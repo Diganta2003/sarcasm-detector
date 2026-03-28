@@ -1,8 +1,5 @@
 streamlit
-tensorflow-cpu
-pytesseract
+pandas
 numpy
-pillow
-lime
 scikit-learn
-opencv-python
+tensorflow
