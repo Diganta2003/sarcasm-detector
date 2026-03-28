@@ -16,8 +16,11 @@ else:
 
 @st.cache_resource
 def load_models():
-    vectorizer = pickle.load(open("vectorizer.pkl", "rb"))
-    model = tf.keras.models.load_model("sarcasm_model.h5")
+    with open("vectorizer.pkl", "rb") as f:
+        vectorizer = pickle.load(f)
+
+    model = tf.keras.models.load_model("sarcasm_model.h5", compile=False)
+
     return vectorizer, model
 
 vectorizer, model = load_models()
