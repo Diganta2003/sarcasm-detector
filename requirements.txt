@@ -1,0 +1,8 @@
+streamlit
+tensorflow
+pytesseract
+numpy
+pillow
+lime
+scikit-learn
+opencv-python
