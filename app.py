@@ -1,92 +1,119 @@
 import streamlit as st
-import pytesseract
 import numpy as np
 from PIL import Image
 import pickle
+import pytesseract
+import tensorflow as tf
 from lime.lime_text import LimeTextExplainer
+import re
+import pandas as pd
 
-# Load model and vectorizer
-model = pickle.load(open("model.pkl", "rb"))
-vectorizer = pickle.load(open("vectorizer.pkl", "rb"))
+import os
+if os.name == 'nt':
+    pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+else:
+    pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 
-# Title
-st.title("Sarcastic Meme Detector")
+@st.cache_resource
+def load_models():
+    vectorizer = pickle.load(open("vectorizer.pkl", "rb"))
+    model = tf.keras.models.load_model("sarcasm_model.h5")
+    return vectorizer, model
 
-st.write("Upload a meme image to detect sarcasm")
+vectorizer, model = load_models()
 
-# Upload image
-uploaded_file = st.file_uploader("Upload Image", type=["png","jpg","jpeg"])
+@st.cache_resource
+def load_tokenizer():
+    from tensorflow.keras.preprocessing.text import Tokenizer
+    tokenizer = Tokenizer(num_words=10000)
+    tokenizer.word_index = {v: k for k, v in enumerate(vectorizer.vocabulary_)}
+    return tokenizer
 
-# Prediction function for LIME
-def predict_proba(texts):
-    vectors = vectorizer.transform(texts)
-    preds = model.predict(vectors.toarray())
+tokenizer = load_tokenizer()
 
-    preds = np.array(preds)
+def cnn_predict_proba(texts):
+    seqs = tokenizer.texts_to_sequences(texts)
+    padded = tf.keras.preprocessing.sequence.pad_sequences(seqs, maxlen=100)
+    prob_sarc = model.predict(padded, verbose=0).flatten()
+    return np.column_stack([1 - prob_sarc, prob_sarc])
 
-    if preds.ndim == 2 and preds.shape[1] == 1:
-        preds = np.concatenate([1 - preds, preds], axis=1)
-
-    return preds
-
-
-# Text cleaning function
 def clean_text(text):
-    text = text.lower()
+    text = str(text).strip()
+    text = re.sub(r'\s+', ' ', text)
     return text
 
+st.set_page_config(page_title="Bengali Sarcasm Detector", page_icon="🎭", layout="centered")
+st.title("🎭 Bengali Sarcastic Meme Detector")
+st.write("Upload a Bengali meme image to detect whether it is sarcastic or not.")
+
+uploaded_file = st.file_uploader("📷 Upload Meme Image", type=["png", "jpg", "jpeg"])
 
 if uploaded_file is not None:
+    image = Image.open(uploaded_file).convert("RGB")
+    st.image(image, caption="Uploaded Meme", use_column_width=True)
 
-    # Show image
-    image = Image.open(uploaded_file)
-    st.image(image, caption="Uploaded Image")
+    with st.spinner("🔍 Extracting Bengali text from image..."):
+        try:
+            text = pytesseract.image_to_string(image, lang="ben")
+        except Exception as e:
+            st.error(f"OCR Error: {e}")
+            st.stop()
 
-    img = np.array(image)
-
-    # OCR text extraction
-    text = pytesseract.image_to_string(img, lang="ben")
-
-    st.subheader("Extracted Text")
-    st.write(text)
-
-    cleaned_text = clean_text(text)
-
-    # Convert to features
-    text_vector = vectorizer.transform([cleaned_text])
-
-    # Prediction
-    prediction = model.predict(text_vector)
-
-    if prediction[0] == 1:
-        st.success("Prediction: Sarcastic")
+    st.subheader("📝 Extracted Text")
+    if text.strip():
+        st.write(text)
     else:
-        st.success("Prediction: Non-Sarcastic")
+        st.warning("⚠️ No Bengali text detected. Try a clearer image.")
+        st.stop()
 
+    cleaned = clean_text(text)
 
-    # LIME explanation
-    class_names = ["Non-Sarcastic", "Sarcastic"]
-    explainer = LimeTextExplainer(class_names=class_names)
+    with st.spinner("🤖 Predicting..."):
+        seqs = tokenizer.texts_to_sequences([cleaned])
+        padded = tf.keras.preprocessing.sequence.pad_sequences(seqs, maxlen=100)
+        prob = model.predict(padded, verbose=0).flatten()[0]
+        prediction = 1 if prob >= 0.5 else 0
 
-    exp = explainer.explain_instance(
-        cleaned_text,
-        predict_proba,
-        num_features=10
-    )
+    st.subheader("🎯 Prediction Result")
+    if prediction == 1:
+        st.error("🔴 This meme is **SARCASTIC**")
+    else:
+        st.success("🟢 This meme is **NOT Sarcastic**")
 
-    st.subheader("Important Words (LIME Explanation)")
-    st.write(exp.as_list())
+    st.write(f"Confidence — Non-Sarcastic: `{(1-prob)*100:.1f}%` | Sarcastic: `{prob*100:.1f}%`")
 
+    with st.spinner("🔎 Generating LIME explanation..."):
+        try:
+            explainer = LimeTextExplainer(
+                class_names=["Non-Sarcastic", "Sarcastic"],
+                split_expression=r'\s+',
+                bow=True
+            )
+            exp = explainer.explain_instance(
+                cleaned,
+                cnn_predict_proba,
+                num_features=10,
+                num_samples=200
+            )
 
-    # Human readable explanation
-    important_words = [word for word, score in exp.as_list()[:3]]
+            st.subheader("💡 LIME Explanation — Important Words")
+            lime_list = exp.as_list()
 
-    st.subheader("Human Explanation")
-    st.write(
-        "The model focused on the words: "
-        + ", ".join(important_words)
-        + " which influenced the sarcasm prediction."
-    )
-import pytesseract
+            if lime_list:
+                lime_df = pd.DataFrame(lime_list, columns=["Word", "Importance"])
+                lime_df["Signal"] = lime_df["Importance"].apply(
+                    lambda x: "🔴 Sarcastic" if x > 0 else "🔵 Non-Sarcastic"
+                )
+                st.dataframe(lime_df, use_container_width=True)
 
-pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
+                top_words = [w for w, s in lime_list[:3]]
+                st.subheader("🗣️ Human Explanation")
+                st.info(
+                    f"The model focused on: **{', '.join(top_words)}** "
+                    f"which most influenced the prediction."
+                )
+        except Exception as e:
+            st.warning(f"LIME explanation failed: {e}")
+
+else:
+    st.info("👆 Please upload a Bengali meme image to get started.")
